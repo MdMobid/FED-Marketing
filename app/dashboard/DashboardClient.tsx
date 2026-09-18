@@ -39,6 +39,17 @@ interface DashboardClientProps {
   };
 }
 
+export function isSubmissionCreditedToMember(s: Submission, memberUid: string, memberName?: string): boolean {
+  if (s.creditedMemberIds && s.creditedMemberIds.length > 0) {
+    if (s.creditedMemberIds.includes(memberUid)) return true;
+  }
+  if (s.memberId === memberUid) return true;
+  if (memberName && s.teamMembers && s.teamMembers.length > 0) {
+    if (s.teamMembers.some((m) => m.toLowerCase().trim() === memberName.toLowerCase().trim())) return true;
+  }
+  return false;
+}
+
 export default function DashboardClient({ user }: DashboardClientProps) {
   const isSuperAdmin = user.role === 'superadmin';
   const isAdmin = user.role === 'admin' || isSuperAdmin;
@@ -494,12 +505,13 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       if (sheetSearch.trim()) {
         const q = sheetSearch.toLowerCase();
         const memberMatch = (s.memberName ?? '').toLowerCase().includes(q);
+        const teamMembersMatch = (s.teamMembers ?? []).some((tm) => tm.toLowerCase().includes(q));
         const teamMatch = (s.teamName ?? '').toLowerCase().includes(q);
         const eventMatch = (s.eventTitle ?? '').toLowerCase().includes(q);
         const formMatch = Object.values(s.formData || {}).some((v) =>
           String(v).toLowerCase().includes(q)
         );
-        return memberMatch || teamMatch || eventMatch || formMatch;
+        return memberMatch || teamMembersMatch || teamMatch || eventMatch || formMatch;
       }
       return true;
     });
@@ -516,7 +528,7 @@ export default function DashboardClient({ user }: DashboardClientProps) {
     return Array.from(keySet);
   }, [filteredSubmissions]);
 
-  // Export to CSV Functionality
+  // Export to CSV Functionality with Full Team Attribution & QR Origin
   function exportToCSV() {
     if (filteredSubmissions.length === 0) {
       alert('No data available to export');
@@ -527,16 +539,38 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       'Submission ID',
       'Date & Time',
       'Event Name',
-      'Marketing Member',
+      'Attributed Marketing Personnel',
       'Team',
-      ...dynamicFormKeys.map((k) => k.toUpperCase()),
+      'Scanned QR Owner / Source',
       'QR Code ID',
+      ...dynamicFormKeys.map((k) => k.toUpperCase()),
     ];
 
     const rows = filteredSubmissions.map((s) => {
       const dt = new Date(s.createdAt).toLocaleString('en-IN', {
         timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
       });
+
+      const isTeamAssigned = Boolean(
+        s.teamName &&
+        !['general', 'unassigned'].includes(s.teamName.toLowerCase()) &&
+        s.teamMembers &&
+        s.teamMembers.length > 0
+      );
+
+      const marketingPersonnel = isTeamAssigned
+        ? s.teamMembers!.join(', ')
+        : (s.memberName || 'Direct Attendee');
+
+      const scannedSource = s.scannedBy || s.memberName || (isTeamAssigned ? `${s.teamName} QR` : 'Direct');
+
       const dynamicVals = dynamicFormKeys.map((k) => {
         const val = s.formData ? s.formData[k] : '';
         return `"${String(val ?? '').replace(/"/g, '""')}"`;
@@ -546,21 +580,24 @@ export default function DashboardClient({ user }: DashboardClientProps) {
         `"${s.id}"`,
         `"${dt}"`,
         `"${(s.eventTitle || '').replace(/"/g, '""')}"`,
-        `"${(s.memberName || 'Team QR').replace(/"/g, '""')}"`,
-        `"${(s.teamName || '').replace(/"/g, '""')}"`,
-        ...dynamicVals,
+        `"${marketingPersonnel.replace(/"/g, '""')}"`,
+        `"${(s.teamName || 'Unassigned').replace(/"/g, '""')}"`,
+        `"${scannedSource.replace(/"/g, '""')}"`,
         `"${s.qrCodeId}"`,
+        ...dynamicVals,
       ].join(',');
     });
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
+    link.setAttribute('href', url);
     link.setAttribute('download', `FED_Leads_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   // Copy scan link
@@ -713,19 +750,43 @@ export default function DashboardClient({ user }: DashboardClientProps) {
     }
   }
 
-  // Leaderboards calculation for analytics
+  // Leaderboards calculation for analytics: credits all members of the squad at submission time
   const memberLeaderboard = useMemo(() => {
     const counts: Record<string, { name: string; team: string; count: number }> = {};
     submissions.forEach((s) => {
-      const key = s.memberId || s.memberName || 'unassigned';
-      if (!counts[key]) {
-        counts[key] = {
-          name: s.memberName || 'Direct / Team',
-          team: s.teamName && !['general', 'unassigned'].includes(s.teamName.toLowerCase()) ? s.teamName : '',
-          count: 0,
-        };
+      const isTeamAssigned = Boolean(
+        s.teamName &&
+        !['general', 'unassigned'].includes(s.teamName.toLowerCase()) &&
+        s.teamMembers &&
+        s.teamMembers.length > 0
+      );
+
+      if (isTeamAssigned && s.teamMembers) {
+        // Team assigned: each member active in the team at that moment receives credit
+        s.teamMembers.forEach((memName, idx) => {
+          const memUid = s.creditedMemberIds && s.creditedMemberIds[idx] ? s.creditedMemberIds[idx] : memName;
+          const key = memUid || memName;
+          if (!counts[key]) {
+            counts[key] = {
+              name: memName,
+              team: s.teamName || '',
+              count: 0,
+            };
+          }
+          counts[key].count += 1;
+        });
+      } else {
+        // Single unassigned member or direct attribution
+        const key = s.memberId || s.memberName || 'unassigned';
+        if (!counts[key]) {
+          counts[key] = {
+            name: s.memberName || 'Direct Attendee',
+            team: s.teamName && !['general', 'unassigned'].includes(s.teamName.toLowerCase()) ? s.teamName : '',
+            count: 0,
+          };
+        }
+        counts[key].count += 1;
       }
-      counts[key].count += 1;
     });
     return Object.values(counts).sort((a, b) => b.count - a.count);
   }, [submissions]);
@@ -1049,7 +1110,9 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                       <span className="text-xs sm:text-sm font-bold text-white">Your Leads for this Event</span>
                       <span className="px-2.5 py-1 rounded-full bg-[#ea580c]/10 text-[#ea580c] font-mono text-xs font-bold">
                         {
-                          submissions.filter((s) => s.eventId === selectedEventId && s.memberId === user.uid).length
+                          submissions.filter(
+                            (s) => s.eventId === selectedEventId && isSubmissionCreditedToMember(s, user.uid, user.name)
+                          ).length
                         }{' '}
                         Registrations
                       </span>
@@ -1057,7 +1120,9 @@ export default function DashboardClient({ user }: DashboardClientProps) {
 
                     <div className="max-h-52 overflow-y-auto space-y-2">
                       {submissions
-                        .filter((s) => s.eventId === selectedEventId && s.memberId === user.uid)
+                        .filter(
+                          (s) => s.eventId === selectedEventId && isSubmissionCreditedToMember(s, user.uid, user.name)
+                        )
                         .map((s) => (
                           <div
                             key={s.id}
@@ -1071,7 +1136,9 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                             </span>
                           </div>
                         ))}
-                      {submissions.filter((s) => s.eventId === selectedEventId && s.memberId === user.uid).length === 0 && (
+                      {submissions.filter(
+                        (s) => s.eventId === selectedEventId && isSubmissionCreditedToMember(s, user.uid, user.name)
+                      ).length === 0 && (
                         <div className="py-6 text-center text-xs text-zinc-500 bg-[#18181b]/50 rounded-xl border border-[#27272a]/40">
                           No registrations captured yet. Show your QR to attendees!
                         </div>
@@ -1377,6 +1444,16 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                 const primaryName = s.formData?.name || s.formData?.fullName || 'Attendee';
                 const primaryPhone = s.formData?.phone || s.formData?.mobile;
                 const primaryEmail = s.formData?.email;
+                const isTeam = Boolean(
+                  s.teamName &&
+                  !['general', 'unassigned'].includes(s.teamName.toLowerCase()) &&
+                  s.teamMembers &&
+                  s.teamMembers.length > 0
+                );
+                const memberDisplay = isTeam
+                  ? s.teamMembers!.join(', ')
+                  : (s.memberName || 'Direct Attendee');
+
                 return (
                   <div key={s.id} className="rounded-2xl bg-[#121214] border border-[#27272a] p-4 space-y-3 shadow-md">
                     <div className="flex items-start justify-between gap-2">
@@ -1391,9 +1468,12 @@ export default function DashboardClient({ user }: DashboardClientProps) {
 
                     <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-[#27272a]/60">
                       <div>
-                        <span className="text-zinc-500 block text-[10px] uppercase font-mono">Attributed To</span>
-                        <span className="text-zinc-200 font-medium truncate block">{s.memberName || 'Direct'}</span>
-                        <span className="text-zinc-500 text-[11px] truncate block">{s.teamName}</span>
+                        <span className="text-zinc-500 block text-[10px] uppercase font-mono">Attributed Personnel</span>
+                        <span className="text-zinc-200 font-medium break-words block">{memberDisplay}</span>
+                        <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 mt-0.5">
+                          <span>{s.teamName || 'Unassigned'}</span>
+                          {s.scannedBy && <span>• via {s.scannedBy}</span>}
+                        </div>
                       </div>
                       {primaryPhone && (
                         <div>
@@ -1438,8 +1518,9 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                     <tr>
                       <th className="py-3 px-4">Time</th>
                       <th className="py-3 px-4">Event</th>
-                      <th className="py-3 px-4">Marketing Member</th>
+                      <th className="py-3 px-4">Marketing Personnel</th>
                       <th className="py-3 px-4">Team</th>
+                      <th className="py-3 px-4">Scanned QR Source</th>
                       {dynamicFormKeys.map((k) => (
                         <th key={k} className="py-3 px-4 text-[#ea580c]">
                           {k}
@@ -1449,37 +1530,60 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#27272a]/60">
-                    {filteredSubmissions.map((s) => (
-                      <tr key={s.id} className="hover:bg-[#18181b]/50 transition-colors">
-                        <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 whitespace-nowrap">
-                          {new Date(s.createdAt).toLocaleString('en-IN', {
-                            timeZone: 'Asia/Kolkata',
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </td>
-                        <td className="py-2.5 px-4 font-medium text-white whitespace-nowrap">{s.eventTitle}</td>
-                        <td className="py-2.5 px-4 whitespace-nowrap">
-                          <span className="font-semibold text-white">{s.memberName || 'Direct / Team'}</span>
-                        </td>
-                        <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-400 whitespace-nowrap">
-                          {s.teamName}
-                        </td>
-                        {dynamicFormKeys.map((k) => (
-                          <td key={k} className="py-2.5 px-4 whitespace-nowrap text-zinc-200">
-                            {String(s.formData?.[k] ?? '—')}
+                    {filteredSubmissions.map((s) => {
+                      const isTeam = Boolean(
+                        s.teamName &&
+                        !['general', 'unassigned'].includes(s.teamName.toLowerCase()) &&
+                        s.teamMembers &&
+                        s.teamMembers.length > 0
+                      );
+                      const memberDisplay = isTeam
+                        ? s.teamMembers!.join(', ')
+                        : (s.memberName || 'Direct Attendee');
+                      const qrSourceDisplay = s.scannedBy || s.memberName || (isTeam ? `${s.teamName} QR` : 'Direct');
+
+                      return (
+                        <tr key={s.id} className="hover:bg-[#18181b]/50 transition-colors">
+                          <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 whitespace-nowrap">
+                            {new Date(s.createdAt).toLocaleString('en-IN', {
+                              timeZone: 'Asia/Kolkata',
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
                           </td>
-                        ))}
-                        <td className="py-2.5 px-4 font-mono text-[10px] text-zinc-500 whitespace-nowrap">
-                          {s.qrCodeId}
-                        </td>
-                      </tr>
-                    ))}
+                          <td className="py-2.5 px-4 font-medium text-white whitespace-nowrap">{s.eventTitle}</td>
+                          <td className="py-2.5 px-4">
+                            <span className="font-semibold text-white block max-w-xs truncate" title={memberDisplay}>
+                              {memberDisplay}
+                            </span>
+                            {isTeam && (
+                              <span className="text-[10px] text-zinc-500 block">
+                                {s.teamMembers!.length} squad members credited
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-400 whitespace-nowrap">
+                            {s.teamName || 'Unassigned'}
+                          </td>
+                          <td className="py-2.5 px-4 whitespace-nowrap text-zinc-300 font-mono text-[11px]">
+                            {qrSourceDisplay}
+                          </td>
+                          {dynamicFormKeys.map((k) => (
+                            <td key={k} className="py-2.5 px-4 whitespace-nowrap text-zinc-200">
+                              {String(s.formData?.[k] ?? '—')}
+                            </td>
+                          ))}
+                          <td className="py-2.5 px-4 font-mono text-[10px] text-zinc-500 whitespace-nowrap">
+                            {s.qrCodeId}
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {filteredSubmissions.length === 0 && (
                       <tr>
-                        <td colSpan={5 + dynamicFormKeys.length} className="py-12 text-center text-zinc-500 text-xs">
+                        <td colSpan={6 + dynamicFormKeys.length} className="py-12 text-center text-zinc-500 text-xs">
                           No submissions match your filters.
                         </td>
                       </tr>
@@ -1594,7 +1698,7 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                 {/* Mobile Personnel Cards (Phones) */}
                 <div className="space-y-2.5 md:hidden">
                   {members.map((m) => {
-                    const leadsCount = submissions.filter((s) => s.memberId === m.uid).length;
+                    const leadsCount = submissions.filter((s) => isSubmissionCreditedToMember(s, m.uid, m.name)).length;
                     return (
                       <div key={m.uid} className="p-4 rounded-2xl bg-[#121214] border border-[#27272a] shadow-md space-y-2">
                         <div className="flex items-start justify-between gap-2">
@@ -1654,7 +1758,7 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                     </thead>
                     <tbody className="divide-y divide-[#27272a]/60">
                       {members.map((m) => {
-                        const leadsCount = submissions.filter((s) => s.memberId === m.uid).length;
+                        const leadsCount = submissions.filter((s) => isSubmissionCreditedToMember(s, m.uid, m.name)).length;
                         return (
                           <tr key={m.uid} className="hover:bg-[#18181b]/50 transition-colors">
                             <td className="py-3 px-4 font-semibold text-white">{m.name}</td>

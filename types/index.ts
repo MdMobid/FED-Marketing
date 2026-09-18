@@ -69,7 +69,9 @@ export type Submission = {
   teamName: string;
   memberId?: string;
   memberName?: string;
+  creditedMemberIds?: string[];
   teamMembers?: string[];
+  scannedBy?: string;
   formData: Record<string, any>;
   createdAt: number;
 };
@@ -79,7 +81,12 @@ export type Lead = {
   id: string;
   qrCodeId: string;
   teamId: string;
+  teamName?: string;
   memberId: string;
+  memberName?: string;
+  creditedMemberIds?: string[];
+  teamMembers?: string[];
+  scannedBy?: string;
   name: string;
   phone: string;
   email: string;

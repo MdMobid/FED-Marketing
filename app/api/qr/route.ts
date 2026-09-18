@@ -25,6 +25,28 @@ export async function GET(req: Request) {
         return NextResponse.json({ error: 'This QR Code is currently inactive' }, { status: 400 });
       }
 
+      // Live lookup for updated team and member info
+      if (qr.type === 'member' && qr.memberId) {
+        const userSnap = await db.ref(`users/${qr.memberId}`).get();
+        if (userSnap.exists()) {
+          const u = userSnap.val();
+          qr.memberName = u.name || qr.memberName;
+          if (u.teamId && u.teamId !== 'unassigned' && u.teamId.trim() !== '') {
+            const tSnap = await db.ref(`teams/${u.teamId}`).get();
+            if (tSnap.exists() && !tSnap.val().deleted) {
+              qr.teamId = u.teamId;
+              qr.teamName = tSnap.val().name;
+            } else {
+              qr.teamId = 'unassigned';
+              qr.teamName = 'Unassigned';
+            }
+          } else {
+            qr.teamId = 'unassigned';
+            qr.teamName = 'Unassigned';
+          }
+        }
+      }
+
       // Also get event details to provide form fields directly
       const eventSnap = await db.ref(`events/${qr.eventId}`).get();
       const event = eventSnap.exists() ? (eventSnap.val() as EventRecord) : null;
@@ -57,7 +79,28 @@ export async function GET(req: Request) {
 
     const existingSnap = await db.ref(`qrCodes/${qrId}`).get();
     if (existingSnap.exists()) {
-      return NextResponse.json({ qr: existingSnap.val() as QRCodeRecord });
+      const existingQr = existingSnap.val() as QRCodeRecord;
+      if (existingQr.type === 'member' && existingQr.memberId) {
+        const userSnap = await db.ref(`users/${existingQr.memberId}`).get();
+        if (userSnap.exists()) {
+          const u = userSnap.val();
+          existingQr.memberName = u.name || existingQr.memberName;
+          if (u.teamId && u.teamId !== 'unassigned' && u.teamId.trim() !== '') {
+            const tSnap = await db.ref(`teams/${u.teamId}`).get();
+            if (tSnap.exists() && !tSnap.val().deleted) {
+              existingQr.teamId = u.teamId;
+              existingQr.teamName = tSnap.val().name;
+            } else {
+              existingQr.teamId = 'unassigned';
+              existingQr.teamName = 'Unassigned';
+            }
+          } else {
+            existingQr.teamId = 'unassigned';
+            existingQr.teamName = 'Unassigned';
+          }
+        }
+      }
+      return NextResponse.json({ qr: existingQr });
     }
 
     // Lookup user & team details
