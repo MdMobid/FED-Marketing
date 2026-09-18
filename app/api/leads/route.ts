@@ -1,0 +1,5 @@
+import { NextResponse } from 'next/server'; import { randomUUID } from 'crypto'; import { db } from '@/lib/firebase-admin'; import { leadSchema } from '@/lib/validation';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+export async function POST(req: Request) { try { const data = leadSchema.parse(await req.json()); const snap = await db.ref(`qrCodes/${data.qrCodeId}`).get(); if (!snap.exists() || !snap.val().active) return NextResponse.json({ error: 'Invalid or inactive QR code' }, { status: 400 }); const qr = snap.val(); const id = randomUUID(); const lead = { id, ...data, teamId: qr.teamId, memberId: qr.memberId ?? '', createdAt: Date.now(), syncStatus: 'pending', syncAttempts: 0 }; await db.ref(`leads/${id}`).set(lead); await db.ref(`syncQueue/${id}`).set({ leadId: id, nextAttemptAt: Date.now(), attempts: 0 }); return NextResponse.json({ success: true, leadId: id }); } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : 'Invalid submission' }, { status: 400 }); } }

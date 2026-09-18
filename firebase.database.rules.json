@@ -1,0 +1,17 @@
+{
+    "rules": {
+        ".read": false,
+        ".write": false,
+        "leads": {
+            "$id": {
+                ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'admin' || root.child('users').child(auth.uid).child('teamId').val() == data.child('teamId').val())"
+            }
+        },
+        "teams": {
+            ".read": "auth != null",
+            "members": {
+                ".read": "auth != null"
+            }
+        }
+    }
+}
